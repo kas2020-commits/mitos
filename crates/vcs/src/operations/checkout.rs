@@ -22,16 +22,18 @@ fn entries(index: &gix::index::File) -> Entries {
 
 impl PreparedOperation {
     pub(super) fn switch_branch(&self, name: &str) -> Result<()> {
-        self.checkout(name, None).map(|_| ())
+        self.checkout(name, None)?
+            .into_applied()
+            .context("Native branch checkout is unsupported")
     }
 
-    /// Return false before mutation when Git must handle an unsupported index or submodule.
+    /// Return Unsupported before mutation when Git must handle an unsupported index or submodule.
     pub(super) fn fast_forward(
         &self,
         name: &str,
         expected: Option<gix::ObjectId>,
         target: gix::ObjectId,
-    ) -> Result<bool> {
+    ) -> Result<NativeOutcome> {
         self.checkout(name, Some((expected, target)))
     }
 
@@ -39,7 +41,7 @@ impl PreparedOperation {
         &self,
         name: &str,
         fast_forward: Option<(Option<gix::ObjectId>, gix::ObjectId)>,
-    ) -> Result<bool> {
+    ) -> Result<NativeOutcome> {
         let mut repo = self.repository.open_read(true)?;
         repo.committer_or_set_generic_fallback()?;
         let refname: gix::refs::FullName = format!("refs/heads/{name}").try_into()?;
@@ -60,12 +62,14 @@ impl PreparedOperation {
                     .iter()
                     .any(|name| repo.common_dir().join("hooks").join(name).exists())
             {
-                return Ok(false);
+                return Ok(NativeOutcome::Unsupported(
+                    "hooks or signature verification",
+                ));
             }
             if let Some(current) = expected {
                 let base = repo.merge_base(current, target)?.map(|id| id.detach());
                 if base == Some(target) {
-                    return Ok(true); // Already up to date, including a local branch ahead of upstream.
+                    return Ok(NativeOutcome::Applied(())); // Already up to date, including a local branch ahead of upstream.
                 }
                 ensure!(
                     base == Some(current),
@@ -94,7 +98,7 @@ impl PreparedOperation {
             (repo.find_commit(target)?.tree_id()?.detach(), edits)
         } else {
             if head == gix::refs::Target::Symbolic(refname.clone()) {
-                return Ok(true);
+                return Ok(NativeOutcome::Applied(()));
             }
             branch::ensure_branch_unused(&repo, refname.as_ref())?;
             let mut branch = repo.find_reference(refname.as_ref())?;
@@ -121,7 +125,7 @@ impl PreparedOperation {
         let mut target = repo.index_from_tree(&target_tree)?;
         let original = repo.index_or_empty()?;
         if fast_forward.is_some() && !index::can_write(&repo, &original) {
-            return Ok(false);
+            return Ok(NativeOutcome::Unsupported("index format"));
         }
         ensure!(
             index::can_write(&repo, &original),
@@ -153,7 +157,7 @@ impl PreparedOperation {
                                     | gix::index::entry::Flags::INTENT_TO_ADD,
                             ))
                     {
-                        return Ok(false);
+                        return Ok(NativeOutcome::Unsupported("submodule or hidden entry"));
                     }
                     ensure!(
                         !entry.mode.is_submodule(),
@@ -352,7 +356,7 @@ impl PreparedOperation {
                 recovery.display()
             );
         }
-        Ok(true)
+        Ok(NativeOutcome::Applied(()))
     }
 }
 

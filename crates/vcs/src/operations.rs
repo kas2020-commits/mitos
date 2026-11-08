@@ -27,6 +27,26 @@ mod stash;
 mod unstage;
 pub use stash::{StashEntry, StashFile, StashLayer};
 
+/// A native attempt may decline only before durable mutation. Execution errors never fall back.
+#[derive(Debug)]
+#[must_use]
+pub(super) enum NativeOutcome<T = ()> {
+    Applied(T),
+    Unsupported(&'static str),
+}
+
+impl<T> NativeOutcome<T> {
+    fn into_applied(self) -> Option<T> {
+        match self {
+            Self::Applied(value) => Some(value),
+            Self::Unsupported(reason) => {
+                log::debug!("Native Git operation requires fallback: {reason}");
+                None
+            }
+        }
+    }
+}
+
 /// Paths are captured before any subprocess starts, including in linked worktrees.
 #[derive(Clone, Debug)]
 pub struct GitRepository {
@@ -132,7 +152,7 @@ impl PreparedOperation {
                     kind: FileOperation::Stage,
                     ..
                 }
-            ) && self.stage()?
+            ) && self.stage()?.into_applied().is_some()
             {
                 return Ok(None);
             }
@@ -142,7 +162,7 @@ impl PreparedOperation {
                     kind: FileOperation::Unstage,
                     ..
                 }
-            ) && self.unstage()?
+            ) && self.unstage()?.into_applied().is_some()
             {
                 return Ok(None);
             }

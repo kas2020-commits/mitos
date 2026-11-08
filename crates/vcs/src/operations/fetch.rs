@@ -12,7 +12,7 @@ pub(super) fn execute(
     repository: &GitRepository,
     name: &str,
     branch: Option<&str>,
-) -> Result<Option<Outcome>> {
+) -> Result<NativeOutcome<Outcome>> {
     // Transport and helper errors can contain credentials. Never expose their source chain.
     execute_inner(repository, name, branch).map_err(|_| anyhow::anyhow!(
         "Fetch failed. Check repository state and authentication in your terminal; remote output is hidden because it can contain credentials"
@@ -23,7 +23,7 @@ fn execute_inner(
     repository: &GitRepository,
     name: &str,
     branch: Option<&str>,
-) -> Result<Option<Outcome>> {
+) -> Result<NativeOutcome<Outcome>> {
     let mut repo = repository.open(true)?;
     {
         let mut config = repo.config_snapshot_mut();
@@ -55,7 +55,7 @@ fn execute_inner(
         format!("remote.{name}.promisor"),
     ] {
         if config.plumbing().boolean(key.as_str())?.unwrap_or(false) {
-            return Ok(None);
+            return Ok(NativeOutcome::Unsupported("fetch configuration"));
         }
     }
     if [
@@ -67,7 +67,7 @@ fn execute_inner(
     .iter()
     .any(|key| config.string(key.as_str()).is_some())
     {
-        return Ok(None);
+        return Ok(NativeOutcome::Unsupported("fetch configuration"));
     }
     let mut upstream = repo.find_remote(name.as_bytes().as_bstr())?;
     let mut url = upstream
@@ -81,7 +81,7 @@ fn execute_inner(
         || std::env::var_os("GIT_ASKPASS").is_some()
         || std::env::var_os("SSH_ASKPASS").is_some()
     {
-        return Ok(None);
+        return Ok(NativeOutcome::Unsupported("transport or authentication"));
     }
     if url.scheme == gix::url::Scheme::File {
         let path = gix::path::from_bstr(&url.path)?;
@@ -93,7 +93,7 @@ fn execute_inner(
     let expected = format!("+refs/heads/*:refs/remotes/{name}/*");
     let specs = upstream.refspecs(gix::remote::Direction::Fetch);
     if specs.len() != 1 || specs[0].to_ref().to_bstring() != expected.as_bytes() {
-        return Ok(None);
+        return Ok(NativeOutcome::Unsupported("fetch refspecs"));
     }
     let merge: Vec<BString> = if let Some(branch) = branch {
         vec![format!("refs/heads/{branch}").into()]
@@ -118,7 +118,7 @@ fn execute_inner(
         Vec::new()
     };
     if merge.iter().any(|name| !name.starts_with(b"refs/heads/")) {
-        return Ok(None);
+        return Ok(NativeOutcome::Unsupported("upstream refspec"));
     }
     let upstream = if let Some(branch) = branch {
         let spec = format!("+refs/heads/{branch}:refs/remotes/{name}/{branch}");
@@ -225,5 +225,5 @@ fn execute_inner(
         fetch_head.write_all(entry.as_bytes())?;
     }
     fetch_head.commit()?;
-    Ok(Some(Outcome { target }))
+    Ok(NativeOutcome::Applied(Outcome { target }))
 }

@@ -763,7 +763,9 @@ async fn native_fetch_updates_tracking_refs_and_fetch_head_without_checkout() ->
         exec_git_cmd(&["config", key, "false"], &root);
     }
     // Calling the native entry point asserts this configuration doesn't silently fall back.
-    assert!(fetch::execute(&repository, "origin", None)?.is_some());
+    assert!(fetch::execute(&repository, "origin", None)?
+        .into_applied()
+        .is_some());
     assert_eq!(git.head_id()?.detach(), before);
     assert_eq!(std::fs::read_to_string(root.join("file.txt"))?, "initial\n");
     let expected = gix::open(source.path())?.head_id()?.detach();
@@ -784,7 +786,9 @@ async fn native_fetch_updates_tracking_refs_and_fetch_head_without_checkout() ->
         &["remote", "set-url", "origin", relative.to_str().unwrap()],
         &root,
     );
-    let fetched = fetch::execute(&repository, "origin", Some("main"))?.unwrap();
+    let fetched = fetch::execute(&repository, "origin", Some("main"))?
+        .into_applied()
+        .unwrap();
     assert_eq!(fetched.target.unwrap().as_str(), expected.to_string());
     execute(&repository, RepositoryOperation::Pull { remote: None }).await?;
     assert_eq!(
@@ -792,7 +796,9 @@ async fn native_fetch_updates_tracking_refs_and_fetch_head_without_checkout() ->
         "remote change\n"
     );
     exec_git_cmd(&["config", "fetch.prune", "true"], &root);
-    assert!(fetch::execute(&repository, "origin", None)?.is_none());
+    assert!(fetch::execute(&repository, "origin", None)?
+        .into_applied()
+        .is_none());
     Ok(())
 }
 
@@ -1581,7 +1587,10 @@ async fn fast_forward_checkout_preserves_local_edits_without_git() -> Result<()>
             .id;
         std::fs::write(repo.root.join("local.txt"), "unstaged local edit\n")?;
         let prepared = repo.prepare_repository(RepositoryOperation::Pull { remote: None }, true)?;
-        assert!(prepared.fast_forward("main", Some(before), target)?);
+        assert!(prepared
+            .fast_forward("main", Some(before), target)?
+            .into_applied()
+            .is_some());
         assert_eq!(git.head_id()?.detach(), target);
         assert_eq!(git.head_name()?.unwrap().as_bstr(), "refs/heads/main");
         assert_eq!(
@@ -1608,7 +1617,10 @@ async fn fast_forward_checkout_preserves_local_edits_without_git() -> Result<()>
         }
         // A local branch ahead of upstream is already up to date, never reset backwards.
         let prepared = repo.prepare_repository(RepositoryOperation::Pull { remote: None }, true)?;
-        assert!(prepared.fast_forward("main", Some(target), before)?);
+        assert!(prepared
+            .fast_forward("main", Some(target), before)?
+            .into_applied()
+            .is_some());
         assert_eq!(git.head_id()?.detach(), target);
         assert!(prepared.fast_forward("main", Some(before), target).is_err());
         return Ok(());
@@ -1717,14 +1729,20 @@ async fn native_pull_defers_unsupported_settings_without_mutation() -> Result<()
         exec_git_cmd(&["config", key, value], dir.path());
         let prepared = repo.prepare_repository(RepositoryOperation::Pull { remote: None }, true)?;
         assert!(
-            !prepared.fast_forward("main", Some(before), target)?,
+            !prepared
+                .fast_forward("main", Some(before), target)?
+                .into_applied()
+                .is_some(),
             "{key}"
         );
         exec_git_cmd(&["config", "--unset", key], dir.path());
     }
     std::fs::write(git.common_dir().join("hooks/post-merge"), "hook")?;
     let prepared = repo.prepare_repository(RepositoryOperation::Pull { remote: None }, true)?;
-    assert!(!prepared.fast_forward("main", Some(before), target)?);
+    assert!(!prepared
+        .fast_forward("main", Some(before), target)?
+        .into_applied()
+        .is_some());
     assert_eq!(git.head_id()?.detach(), before);
     assert_eq!(std::fs::read(git.index_path())?, index);
     assert_eq!(

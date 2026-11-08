@@ -611,3 +611,45 @@ async fn staging_without_git_applies_attributes_and_keeps_other_entries() -> Res
     );
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_native_filters_are_not_retried_with_git() -> Result<()> {
+    let dir = initial();
+    let root = dir.path();
+    std::fs::write(root.join(".gitattributes"), "file.txt filter=once\n")?;
+    exec_git_cmd(
+        &[
+            "config",
+            "filter.once.clean",
+            "echo called >> filter-calls; exit 1",
+        ],
+        root,
+    );
+    exec_git_cmd(&["config", "filter.once.required", "true"], root);
+    std::fs::write(root.join("file.txt"), "local changes\n")?;
+    let repo = GitRepository::discover(root)?;
+    let git = repo.open_read(true)?;
+    let before = std::fs::read(git.index_path())?;
+    let status = FileStatus {
+        staged: None,
+        unstaged: Some(FileChange::Modified {
+            path: root.join("file.txt"),
+        }),
+    };
+    assert!(repo
+        .prepare_file(&status, FileOperation::Stage, true)?
+        .execute()
+        .await
+        .is_err());
+    assert_eq!(
+        std::fs::read_to_string(root.join("filter-calls"))?,
+        "called\n"
+    );
+    assert_eq!(std::fs::read(git.index_path())?, before);
+    assert_eq!(
+        std::fs::read_to_string(root.join("file.txt"))?,
+        "local changes\n"
+    );
+    Ok(())
+}
