@@ -90,33 +90,23 @@ fn execute_inner(
             upstream = upstream.with_url_without_url_rewrite(url)?;
         }
     }
-    let expected = format!("+refs/heads/*:refs/remotes/{name}/*");
     let specs = upstream.refspecs(gix::remote::Direction::Fetch);
-    if branch.is_some() {
-        // Pull replaces these specs with one explicit branch request below. Keep
-        // custom mappings and exclusions with Git rather than silently overriding them.
-        if specs.len() != 1 || specs[0].to_ref().to_bstring() != expected.as_bytes() {
-            return Ok(None);
-        }
-    } else {
-        use gix::refspec::{instruction::Fetch, Instruction};
-        let destination = format!("refs/remotes/{name}/");
-        let mut has_mapping = false;
-        for spec in specs {
-            match spec.to_ref().instruction() {
-                Instruction::Fetch(Fetch::AndUpdate { src, dst, .. })
-                    if src.starts_with(b"refs/heads/")
-                        && dst.starts_with(destination.as_bytes()) =>
-                {
-                    has_mapping = true;
-                }
-                Instruction::Fetch(Fetch::Exclude { src }) if src.starts_with(b"refs/heads/") => {}
-                _ => return Ok(None),
+    use gix::refspec::{instruction::Fetch, Instruction};
+    let destination = format!("refs/remotes/{name}/");
+    let mut has_mapping = false;
+    for spec in specs {
+        match spec.to_ref().instruction() {
+            Instruction::Fetch(Fetch::AndUpdate { src, dst, .. })
+                if src.starts_with(b"refs/heads/") && dst.starts_with(destination.as_bytes()) =>
+            {
+                has_mapping = true;
             }
+            Instruction::Fetch(Fetch::Exclude { src }) if src.starts_with(b"refs/heads/") => {}
+            _ => return Ok(None),
         }
-        if !has_mapping {
-            return Ok(None);
-        }
+    }
+    if !has_mapping {
+        return Ok(None);
     }
     let merge: Vec<BString> = if let Some(branch) = branch {
         vec![format!("refs/heads/{branch}").into()]
@@ -144,8 +134,53 @@ fn execute_inner(
         return Ok(None);
     }
     let upstream = if let Some(branch) = branch {
-        let spec = format!("+refs/heads/{branch}:refs/remotes/{name}/{branch}");
-        upstream.with_refspecs([spec.as_str()], gix::remote::Direction::Fetch)?
+        let source = format!("refs/heads/{branch}");
+        // Match configured mappings rather than inventing a conventional tracking
+        // name. Specializing to this source avoids fetching unrelated branches.
+        let item = gix::refspec::match_group::Item {
+            full_ref_name: source.as_bytes().as_bstr(),
+            target: repo.object_hash().null_ref(),
+            object: None,
+        };
+        let outcome =
+            gix::refspec::MatchGroup::from_fetch_specs(specs.iter().map(|spec| spec.to_ref()))
+                .match_lhs(std::iter::once(item));
+        // An explicit Git fetch overrides configured exclusions. Keep that existing
+        // porcelain behavior in the fallback, before contacting the remote.
+        let request = gix::refspec::parse(
+            source.as_bytes().as_bstr(),
+            gix::refspec::parse::Operation::Fetch,
+        )?;
+        if gix::refspec::MatchGroup::from_fetch_specs(std::iter::once(request).chain(
+            specs.iter().map(|spec| spec.to_ref()).filter(|spec| {
+                matches!(
+                    spec.instruction(),
+                    Instruction::Fetch(Fetch::Exclude { .. })
+                )
+            }),
+        ))
+        .match_lhs(std::iter::once(item))
+        .mappings
+        .is_empty()
+        {
+            return Ok(None);
+        }
+        let mut selected = vec![BString::from(source.as_str())];
+        for mapping in outcome.mappings {
+            if let Some(destination) = mapping.rhs {
+                let force = if specs[mapping.spec_index].allow_non_fast_forward() {
+                    "+"
+                } else {
+                    ""
+                };
+                selected.push(format!("{force}{source}:{destination}").into());
+            }
+        }
+        upstream.replace_refspecs(
+            selected.iter().map(|spec| spec.as_bstr()),
+            gix::remote::Direction::Fetch,
+        )?;
+        upstream
     } else if !merge.is_empty() {
         // Git also fetches the configured upstream into FETCH_HEAD when no mapping
         // covers it. Keep these source-only requests in the same group so negative
@@ -156,10 +191,11 @@ fn execute_inner(
             .map(|spec| spec.to_ref().to_bstring())
             .chain(merge.iter().cloned())
             .collect();
-        upstream.with_refspecs(
+        upstream.replace_refspecs(
             specs.iter().map(|spec| spec.as_bstr()),
             gix::remote::Direction::Fetch,
-        )?
+        )?;
+        upstream
     } else {
         upstream
     };
